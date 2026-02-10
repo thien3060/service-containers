@@ -1,0 +1,171 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Management Node: EC2 instance, cloudformation template'
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: 'Parent Stacks'
+        Parameters:
+          - ParentVPCStack
+      - Label:
+          default: 'EC2 Parameters'
+        Parameters:
+          - InstanceType
+          - KeyName
+          - SecurityGroup
+          - Subnet
+          - LatestAmiId
+          - SubDomainName
+          - HostedZone
+          - AMIRole
+          - VolumeSize
+          - PublicKeyS3Path
+Parameters:
+  ParentVPCStack:
+    Description: 'Stack name of parent VPC stack based on vpc/vpc-*azs.yaml template.'
+    Type: String
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.nano, t3.micro, t3.small, t3.medium, t3.large, t3.xlarge, t3.2xlarge,
+                    m6a.large, m6a.xlarge, m6a.2xlarge]
+    ConstraintDescription: must be a valid EC2 instance type.
+  SecurityGroup:
+    Description: 'Security group for the EC2 instance.'
+    Type: String
+    Default: ''
+  Subnet:
+    Description: 'Subnet for the EC2 instance.'
+    Type: String
+    Default: ''
+  LatestAmiId:
+    Type:  'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
+  HostedZone:
+    Description: 'The name of the hosted zone to create the DNS record in.'
+    Type: String
+    Default: ''
+  SubDomainName:
+    Description: 'Name that is used to create the DNS entry without trailing dot (e.g. db.example).'
+    Type: String
+    Default: ''
+  AMIRole:
+    Description: 'The IAM role to associate with the EC2 instance.'
+    Type: String
+    Default: 'Mgmt-Node-Role'
+  VolumeSize:
+    Description: 'The size of the Instance volume in GiB.'
+    Type: Number
+    Default: 100
+    MinValue: 20
+    MaxValue: 500
+  PublicKeyS3Path:
+    Description: 'The S3 bucket name where the public key is stored.'
+    Type: String
+    Default: 's3://cf-public-keys/mgmt-dev/authorized_keys'
+Conditions:
+  NoSecurityGroup: !Equals [!Ref SecurityGroup, '']
+  HasSubnet: !Not [!Equals [!Ref Subnet, '']]
+  HasHostedZone: !Not [!Equals [!Ref HostedZone, '']]
+Resources:
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+        Count: 1
+    Metadata:
+      Comment: Install psql client
+      'AWS::CloudFormation::Init':
+        configSets:
+          install:
+            - install_psql
+        install_psql:
+          packages:
+            yum:
+              postgresql16: []
+    Properties:
+      InstanceType: !Ref 'InstanceType'
+      KeyName: !Ref 'KeyName'
+      ImageId: !Ref 'LatestAmiId'
+      IamInstanceProfile: !Ref 'AMIRole'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref 'VolumeSize'
+            VolumeType: gp3
+            DeleteOnTermination: true
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: !If [NoSecurityGroup, [!Ref 'InstanceSecurityGroup'], [!Ref 'SecurityGroup']]
+          SubnetId: !If [HasSubnet, !Ref Subnet, {'Fn::ImportValue': !Sub '${ParentVPCStack}-SubnetAPublic'}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Update yum and install aws-cfn-bootstrap if needed
+          yum update -y aws-cfn-bootstrap
+          
+          # Run cfn-init
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --configsets install --region ${AWS::Region}
+          CFN_INIT_RESULT=$?
+          
+          # Only proceed if cfn-init succeeded
+          if [ $CFN_INIT_RESULT -eq 0 ]; then
+            # Append SSH key to authorized_keys
+            if aws s3 cp ${PublicKeyS3Path} /tmp/new_key.pub; then
+              cat /tmp/new_key.pub >> /home/ec2-user/.ssh/authorized_keys
+              chmod 600 /home/ec2-user/.ssh/authorized_keys
+              chown ec2-user:ec2-user /home/ec2-user/.ssh/authorized_keys
+              rm -f /tmp/new_key.pub
+              echo "SSH key appended successfully"
+            else
+              echo "Failed to copy SSH key from S3"
+              CFN_INIT_RESULT=1
+            fi
+          fi
+          
+          # Signal CloudFormation with the result
+          /opt/aws/bin/cfn-signal -e $CFN_INIT_RESULT --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region}
+  InstanceSecurityGroup:
+    Condition: NoSecurityGroup
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH access via port 22
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      VpcId: {'Fn::ImportValue': !Sub '${ParentVPCStack}-VPC'}
+  DNSRecordSet:
+    Condition: HasHostedZone
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Sub '${HostedZone}.'
+      Name: !Sub '${SubDomainName}.${HostedZone}'
+      Type: A
+      TTL: '300'
+      ResourceRecords:
+        - !GetAtt EC2Instance.PublicIp
+Outputs:
+  InstanceId:
+    Description: InstanceId of the newly created EC2 instance
+    Value: !Ref 'EC2Instance'
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+  PublicDNS:
+    Description: Public DNSName of the newly created EC2 instance
+    Value: !GetAtt [EC2Instance, PublicDnsName]
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicDNS'
+  PublicIP:
+    Description: Public IP address of the newly created EC2 instance
+    Value: !GetAtt [EC2Instance, PublicIp]
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicIP'

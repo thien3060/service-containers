@@ -1,0 +1,10 @@
+services:
+  backend:
+    build:
+      context: .
+    container_name: portal-backend
+    restart: unless-stopped
+    env_file:
+      - /home/ubuntu/data/env/portal-backend/prod.env
+    networks:
+      - app-network

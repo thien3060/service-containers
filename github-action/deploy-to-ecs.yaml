@@ -1,0 +1,74 @@
+name: Deploy Production
+
+on:
+    workflow_dispatch:
+
+jobs:
+    deploy:
+        name: Deploy
+        runs-on: ubuntu-latest
+        environment: production
+        env:
+            AWS_REGION: us-east-1
+            ECR_REPOSITORY: production/mysite
+            DOCKER_FILE: Dockerfile.Production
+            ECS_CONTAINER_NAME: portal-frontend
+            ECS_CLUSTER: production-cluster
+            ECS_SERVICE: portal-frontend
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v5
+            - name: Configure AWS credentials
+              uses: aws-actions/configure-aws-credentials@13d241b293754004c80624b5567555c4a39ffbe3
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ env.AWS_REGION }}
+            - name: Login to Amazon ECR
+              id: login-ecr
+              uses: aws-actions/amazon-ecr-login@62f4f872db3836360b72999f4b87f1ff13310f3a
+            - name: Generate image tag
+              id: gen-image-tag
+              run: echo "sha_short=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+            - name: Build, tag, and push image to Amazon ECR
+              id: build-image
+              env:
+                  ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+                  IMAGE_TAG: ${{ steps.gen-image-tag.outputs.sha_short }}
+              run: |
+                  docker build \
+                    -f "$DOCKER_FILE" \
+                    -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+                    .
+                  docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+                  echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+            - name: Get current task definition from service
+              id: get-task-def-version
+              run: |
+                  TASK_DEF_ARN=$(aws ecs describe-services \
+                    --cluster ${{ env.ECS_CLUSTER }} \
+                    --services ${{ env.ECS_SERVICE }} \
+                    --query "services[0].taskDefinition" \
+                    --output text)
+                  echo "Current task definition ARN: $TASK_DEF_ARN"
+                  echo "task-def-arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+            - name: Download task definition
+              run: |
+                aws ecs describe-task-definition \
+                  --task-definition ${{ steps.get-task-def-version.outputs.task-def-arn }} \
+                  --query 'taskDefinition' \
+                  --output json | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt)' > task-definition.json
+            - name: Render Amazon ECS task definition with new image
+              id: task-def
+              uses: aws-actions/amazon-ecs-render-task-definition@06472d439cb66af6210a6709bfc842c26b053706
+              with:
+                task-definition: task-definition.json
+                container-name: ${{ env.ECS_CONTAINER_NAME }}
+                image: ${{ steps.build-image.outputs.image }}
+            - name: Deploy to Amazon ECS
+              uses: aws-actions/amazon-ecs-deploy-task-definition@c6e19c08506099e50400581201a3a767fd8e3ff4
+              with:
+                task-definition: ${{ steps.task-def.outputs.task-definition }}
+                service: ${{ env.ECS_SERVICE }}
+                cluster: ${{ env.ECS_CLUSTER }}
+                wait-for-service-stability: true

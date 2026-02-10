@@ -1,0 +1,191 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Template to Create Neptune Cluster'
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: 'Parent Stacks'
+        Parameters:
+          - ParentVPCStack
+      - Label:
+          default: 'Neptune Parameters'
+        Parameters:
+          - DBClusterIdentifier
+          - EngineVersion
+          - BackupRetentionPeriod
+          - DBClusterParameterGroupName
+          - DBClusterParameterGroupFamily
+          - DBSubnetGroupName
+          - DeletionProtection
+          - PreferredBackupWindow
+          - PreferredMaintenanceWindow
+          - SnapshotIdentifier
+          - StorageEncrypted
+          - VpcSecurityGroupIds
+          - DBInstanceClass
+          - DBInstanceIdentifier
+          - DBInstanceReplicate
+          - EnablePerformanceInsights
+
+Parameters:
+  ParentVPCStack:
+    Description: 'Stack name of parent VPC stack based on vpc/vpc-*azs.yaml template.'
+    Type: String
+  DBClusterIdentifier:
+    Description: 'The name of the Neptune cluster.'
+    Type: String
+    Default: ''
+  EngineVersion:
+    Description: 'The version number of the Neptune engine to use.'
+    Type: String
+    Default: '1.2.1.0'
+  BackupRetentionPeriod:
+    Description: 'The number of days to keep snapshots of the cluster.'
+    Type: Number
+    MinValue: 0
+    MaxValue: 35
+    Default: 7
+  DBClusterParameterGroupName:
+    Description: 'The name of the parameter group to associate with this Neptune cluster.'
+    Type: String
+    Default: ''
+  DBClusterParameterGroupFamily:
+    Description: 'The family of the Neptune parameter group.'
+    Type: String
+    Default: 'neptune1.2'
+  DBSubnetGroupName:
+    Description: 'The name of the subnet group to associate with this Neptune cluster.'
+    Type: String
+    Default: ''
+  DeletionProtection:
+    Description: 'Indicates whether the cluster has deletion protection enabled.'
+    Type: String
+    Default: false
+    AllowedValues: [ true, false ]
+  IamAuthEnabled:
+    Description: 'Indicates whether IAM database authentication is enabled.'
+    Type: String
+    Default: false
+    AllowedValues: [ true, false ]
+  PreferredBackupWindow:
+    Description: 'The daily time range during which automated backups are created.'
+    Type: String
+    Default: '07:00-09:00'
+  PreferredMaintenanceWindow:
+    Description: 'The weekly time range (in UTC) during which system maintenance can occur.'
+    Type: String
+    Default: 'sun:03:00-sun:04:00'
+  SnapshotIdentifier:
+    Description: 'The name of the snapshot from which to create this cluster.'
+    Type: String
+    Default: ''
+  StorageEncrypted:
+    Description: 'Indicates whether the cluster is encrypted.'
+    Type: String
+    Default: true
+    AllowedValues: [ true, false ]
+  DBInstanceClass:
+    Description: 'The instance type for the Neptune database server.'
+    Type: String
+    Default: 'db.t3.medium'
+  DBInstanceReplicate:
+    Description: 'Create replica DB instances for the Neptune cluster. Default is false.'
+    Type: String
+    Default: false
+    AllowedValues: [ true, false ]
+  HostedZone:
+    Description: 'The name of the hosted zone to create the DNS record in.'
+    Type: String
+    Default: 'iomics.io'
+  SubDomainName:
+    Description: 'Name that is used to create the DNS entry without trailing dot (e.g. db.example).'
+    Type: String
+    Default: ''
+
+Conditions:
+  HasSnapshotIdentifier: !Not [!Equals [!Ref SnapshotIdentifier, '']]
+  InstanceReplicate: !Equals [!Ref DBInstanceReplicate, 'true']
+  HasHostedZone: !Not [!Equals [!Ref HostedZone, '']]
+
+Resources:
+  NeptuneSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Ref 'AWS::StackName'
+      VpcId: {'Fn::ImportValue': !Sub '${ParentVPCStack}-VPC'}
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8182
+          ToPort: 8182
+          CidrIp: {'Fn::ImportValue': !Sub "${ParentVPCStack}-CidrBlock"}
+
+  NeptuneSubnetGroup:
+    Type: AWS::Neptune::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Ref DBSubnetGroupName
+      DBSubnetGroupDescription: Subnet group for Neptune
+      SubnetIds: !Split [',', {'Fn::ImportValue': !Sub '${ParentVPCStack}-SubnetsPrivate'}]
+
+  NeptuneParameterGroup:
+    Type: AWS::Neptune::DBClusterParameterGroup
+    Properties:
+      Description: 'Parameter group for the Neptune cluster.'
+      Family: !Ref DBClusterParameterGroupFamily
+      Name: !Ref DBClusterParameterGroupName
+      Parameters:
+        neptune_enable_audit_log: '1'
+
+  NeptuneDBCluster:
+    Type: AWS::Neptune::DBCluster
+    Properties:
+      DBClusterIdentifier: !Ref DBClusterIdentifier
+      EngineVersion: !Ref EngineVersion
+      BackupRetentionPeriod: !Ref BackupRetentionPeriod
+      DBClusterParameterGroupName: !Ref DBClusterParameterGroupName
+      DBSubnetGroupName: !Ref NeptuneSubnetGroup
+      DeletionProtection: !Ref DeletionProtection
+      IamAuthEnabled: !Ref IamAuthEnabled
+      PreferredBackupWindow: !Ref PreferredBackupWindow
+      PreferredMaintenanceWindow: !Ref PreferredMaintenanceWindow
+      SnapshotIdentifier: !If [HasSnapshotIdentifier, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
+      AssociatedRoles:
+        -  RoleArn: !Sub 'arn:aws:iam::256056681342:role/aws-service-role/rds.amazonaws.com/AWSServiceRoleForRDS'
+      StorageEncrypted: !Ref StorageEncrypted
+      VpcSecurityGroupIds:
+        - !Ref NeptuneSecurityGroup
+    DependsOn:
+      - NeptuneParameterGroup
+      - NeptuneSubnetGroup
+
+  NeptuneInstance:
+    Type: AWS::Neptune::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref NeptuneDBCluster
+      DBInstanceClass: !Ref DBInstanceClass
+      DBInstanceIdentifier: !Sub '${DBClusterIdentifier}-0'
+      AutoMinorVersionUpgrade: true
+  
+  DNSRecordSet:
+      Condition: HasHostedZone
+      Type: AWS::Route53::RecordSet
+      Properties:
+        HostedZoneName: !Sub '${HostedZone}.'
+        Name: !Sub '${SubDomainName}.${HostedZone}'
+        Type: CNAME
+        TTL: '60'
+        ResourceRecords:
+        - !GetAtt 'NeptuneDBCluster.Endpoint'
+      DependsOn: NeptuneDBCluster
+
+Outputs:
+  ClusterEndpoint:
+    Description: 'The connection endpoint for the Neptune cluster.'
+    Value: !GetAtt 'NeptuneDBCluster.Endpoint'
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterEndpoint'
+
+  ReaderEndpoint:
+    Description: 'The reader endpoint for the Neptune cluster.'
+    Value: !GetAtt 'NeptuneDBCluster.ReadEndpoint'
+    Export:
+      Name: !Sub '${AWS::StackName}-ReaderEndpoint'

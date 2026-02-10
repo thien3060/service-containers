@@ -1,0 +1,214 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Template to Create DocumentDB Cluster'
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: 'Parent Stacks'
+        Parameters:
+          - ParentVPCStack
+      - Label:
+          default: 'DocumentDB Parameters'
+        Parameters:
+          - DBClusterIdentifier
+          - EngineVersion
+          - BackupRetentionPeriod
+          - DBClusterParameterGroupName
+          - DBSubnetGroupName
+          - DeletionProtection
+          - MasterUsername
+          - DBMasterUserPasswordVaultPath
+          - PreferredBackupWindow
+          - PreferredMaintenanceWindow
+          - SnapshotIdentifier
+          - SourceDBClusterIdentifier
+          - StorageEncrypted
+          - VpcSecurityGroupIds
+          - DBInstanceClass
+          - DBInstanceIdentifier
+          - DBInstanceReplicate
+          - EnablePerformanceInsights
+Parameters:
+  ParentVPCStack:
+    Description: 'Stack name of parent VPC stack based on vpc/vpc-*azs.yaml template.'
+    Type: String
+  DBClusterIdentifier:
+    Description: 'The name of the cluster.'
+    Type: String
+    Default: ''
+  EngineVersion:
+    Description: 'The version number of the database engine to use.'
+    Type: String
+    Default: '5.0.0'
+  BackupRetentionPeriod:
+    Description: 'The number of days to keep snapshots of the database.'
+    Type: Number
+    MinValue: 0
+    MaxValue: 35
+    Default: 3
+  DBClusterParameterGroupName:
+    Description: 'The name of the parameter group to associate with this cluster.'
+    Type: String
+    Default: ''
+  DBSubnetGroupName:
+    Description: 'The name of the subnet group to associate with this cluster.'
+    Type: String
+    Default: ''
+  DeletionProtection:
+    Description: 'Indicates whether the cluster has deletion protection enabled.'
+    Type: String
+    Default: true
+    AllowedValues: [ true, false ]
+  MasterUsername:
+    Description: 'The master user name for the DB instance (ignored when DBSnapshotIdentifier is set, value used from snapshot).'
+    Type: String
+    Default: 'root'
+  DBMasterUserPasswordVaultPath:
+    Description: 'The master password for the DB instance read from parameter store (ignored when DBSnapshotIdentifier is set, value used from snapshot.).'
+    Type: String
+    Default: ''
+  PreferredBackupWindow:
+    Description: 'The daily time range during which automated backups are created if automated backups are enabled using the BackupRetentionPeriod parameter.'
+    Type: String
+    Default: '07:00-09:00'
+  PreferredMaintenanceWindow:
+    Description: 'The weekly time range (in UTC) during which system maintenance can occur.'
+    Type: String
+    Default: 'sun:03:00-sun:04:00'
+  SnapshotIdentifier:
+    Description: 'The name of the snapshot from which to create this cluster.'
+    Type: String
+    Default: ''
+  StorageEncrypted:
+    Description: 'Indicates whether the cluster is encrypted.'
+    Type: String
+    Default: true
+    AllowedValues: [ true, false ]
+  DBInstanceClass:
+    Description: 'The instance type of database server.'
+    Type: String
+    Default: 'db.t3.medium'
+  DBInstanceReplicate:
+    Description: 'Create 3 Replica DB Instance. Default is false'
+    Type: String
+    Default: false
+    AllowedValues: [ true, false ]
+  EnablePerformanceInsights:
+    Description: 'Specifies whether to enable Performance Insights for the DB instance.'
+    Type: String
+    Default: true
+    AllowedValues: [true, false]
+  HostedZone:
+    Description: 'The name of the hosted zone to create the DNS record in.'
+    Type: String
+    Default: 'iomics.io'
+  SubDomainName:
+    Description: 'Name that is used to create the DNS entry without trailing dot (e.g. db.example).'
+    Type: String
+    Default: ''
+Conditions:
+    HasSnapshotIdentifier: !Not [!Equals [!Ref SnapshotIdentifier, '']]
+    HasHostedZone: !Not [!Equals [!Ref HostedZone, '']]
+    InstanceReplicate: !Equals [!Ref DBInstanceReplicate, 'true']
+Resources:
+    DatabaseSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: !Ref 'AWS::StackName'
+        VpcId: {'Fn::ImportValue': !Sub '${ParentVPCStack}-VPC'}
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 27017
+            ToPort: 27017
+            CidrIp: 0.0.0.0/0
+    DBSubnetGroup:
+      Type: AWS::DocDB::DBSubnetGroup
+      Properties:
+        DBSubnetGroupName: !Ref DBSubnetGroupName
+        DBSubnetGroupDescription: !Ref 'AWS::StackName'
+        SubnetIds: !Split [',', {'Fn::ImportValue': !Sub '${ParentVPCStack}-SubnetsPrivate'}]
+    DocumentDBParameterGroup:
+      Type: AWS::DocDB::DBClusterParameterGroup
+      Properties:
+        Description: 'Parameter group for the DocumentDB cluster.'
+        Family: 'docdb5.0'
+        Name: !Ref DBClusterParameterGroupName
+        Parameters:
+          tls: 'enabled'
+          audit_logs: 'enabled'
+          ttl_monitor: 'enabled'
+    DBCluster:
+      Type: AWS::DocDB::DBCluster
+      Properties:
+        DBClusterIdentifier: !Ref DBClusterIdentifier
+        EngineVersion: !Ref EngineVersion
+        BackupRetentionPeriod: !Ref BackupRetentionPeriod
+        DBClusterParameterGroupName: !Ref DBClusterParameterGroupName
+        DBSubnetGroupName: !Ref DBSubnetGroupName
+        DeletionProtection: !Ref DeletionProtection
+        MasterUsername: !Ref MasterUsername
+        MasterUserPassword: !Sub '{{resolve:ssm:${DBMasterUserPasswordVaultPath}}}'
+        PreferredBackupWindow: !Ref PreferredBackupWindow
+        PreferredMaintenanceWindow: !Ref PreferredMaintenanceWindow
+        SnapshotIdentifier: !If [HasSnapshotIdentifier, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
+        StorageEncrypted: !Ref StorageEncrypted
+        VpcSecurityGroupIds:
+          - !Ref DatabaseSecurityGroup
+      DependsOn:
+        - DocumentDBParameterGroup
+        - DBSubnetGroup
+    DBInstance:
+      Type: AWS::DocDB::DBInstance
+      Properties:
+        DBClusterIdentifier: !Ref DBCluster
+        DBInstanceClass: !Ref DBInstanceClass
+        DBInstanceIdentifier: !Sub '${DBClusterIdentifier}-0'
+        EnablePerformanceInsights: !Ref EnablePerformanceInsights
+    DBInstanceReplica1:
+      Condition: InstanceReplicate
+      Type: AWS::DocDB::DBInstance
+      Properties:
+        DBClusterIdentifier: !Ref DBCluster
+        DBInstanceClass: !Ref DBInstanceClass
+        DBInstanceIdentifier: !Sub '${DBClusterIdentifier}-1'
+        EnablePerformanceInsights: !Ref EnablePerformanceInsights
+    DBInstanceReplica2:
+      Condition: InstanceReplicate
+      Type: AWS::DocDB::DBInstance
+      Properties:
+        DBClusterIdentifier: !Ref DBCluster
+        DBInstanceClass: !Ref DBInstanceClass
+        DBInstanceIdentifier: !Sub '${DBClusterIdentifier}-2'
+        EnablePerformanceInsights: !Ref EnablePerformanceInsights
+    DNSRecordSet:
+      Condition: HasHostedZone
+      Type: AWS::Route53::RecordSet
+      Properties:
+        HostedZoneName: !Sub '${HostedZone}.'
+        Name: !Sub '${SubDomainName}.${HostedZone}'
+        Type: CNAME
+        TTL: '60'
+        ResourceRecords:
+        - !GetAtt 'DBCluster.Endpoint'
+      DependsOn: DBCluster
+Outputs:
+  TemplateID:
+    Description: 'Zymo Research template ID.'
+    Value: 'database/documentdb'
+  TemplateVersion:
+    Description: 'Zymo Research template version.'
+    Value: '__VERSION__'
+  StackName:
+    Description: 'Stack name.'
+    Value: !Sub '${AWS::StackName}'
+  DBClusterIdentifier:
+    Description: 'The name of the cluster.'
+    Value: !Ref DBClusterIdentifier
+    Export:
+      Name: !Sub '${AWS::StackName}-DBClusterIdentifier'
+  DNSName:
+    Description: 'The connection endpoint for the cluster.'
+    Value: !GetAtt 'DBCluster.Endpoint'
+    Export:
+      Name: !Sub '${AWS::StackName}-DNSName'

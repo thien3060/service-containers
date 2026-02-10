@@ -1,0 +1,224 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Database: RDS Postgres, cloudformation template'
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: 'Parent Stacks'
+        Parameters:
+          - ParentVPCStack
+      - Label:
+          default: 'RDS Parameters'
+        Parameters:
+          - DBSnapshotIdentifier
+          - EngineVersion
+          - DBAllocatedStorage
+          - DBInstanceClass
+          - DBName
+          - DBBackupRetentionPeriod
+          - DBMasterUsername
+          - DBMasterUserPasswordVaultPath
+          - DBMultiAZ
+          - DBOptionGroupName
+          - DBParameterGroupName
+          - CreateDBParameterGroup
+          - HostedZone
+          - SubDomainName
+          - PreferredBackupWindow
+          - PreferredMaintenanceWindow
+          - EnableIAMDatabaseAuthentication
+Parameters:
+  ParentVPCStack:
+    Description: 'Stack name of parent VPC stack based on vpc/vpc-*azs.yaml template.'
+    Type: String
+  DBSnapshotIdentifier:
+    Description: 'Optional name or Amazon Resource Name (ARN) of the DB snapshot from which you want to restore (leave blank to create an empty database).'
+    Type: String
+    Default: ''
+  DBAllocatedStorage:
+    Description: 'The allocated storage size, specified in GB (ignored when DBSnapshotIdentifier is set, value used from snapshot).'
+    Type: Number
+    Default: 5
+    MinValue: 5
+    MaxValue: 16384
+  DBInstanceClass:
+    Description: 'The instance type of database server.'
+    Type: String
+    Default: 'db.t3.small'
+  DBName:
+    Description: 'Name of the database (ignored when DBSnapshotIdentifier is set, value used from snapshot).'
+    Type: String
+    Default: ''
+  DBBackupRetentionPeriod:
+    Description: 'The number of days to keep snapshots of the database.'
+    Type: Number
+    MinValue: 0
+    MaxValue: 35
+    Default: 30
+  DBMasterUsername:
+    Description: 'The master user name for the DB instance (ignored when DBSnapshotIdentifier is set, value used from snapshot).'
+    Type: String
+    Default: 'root'
+  DBMasterUserPasswordVaultPath:
+    Description: 'The master password for the DB instance read from parameter store (ignored when DBSnapshotIdentifier is set, value used from snapshot.).'
+    Type: String
+    Default: ''
+  DBMultiAZ:
+    Description: 'Specifies if the database instance is deployed to multiple Availability Zones for HA.'
+    Type: String
+    Default: true
+    AllowedValues: [true, false]
+  DBOptionGroupName:
+    Description: 'Optional name of an existing DB option group.'
+    Type: String
+    Default: ''
+  DBParameterGroupName:
+    Description: 'Optional name of an existing DB parameter group.'
+    Type: String
+    Default: ''
+  CreateDBParameterGroup:
+    Description: 'Specifies if a new DB parameter group should be created.'
+    Type: String
+    Default: false
+    AllowedValues: [true, false]
+  HostedZone:
+    Description: 'The name of the hosted zone to create the DNS record in.'
+    Type: String
+    Default: ''
+  SubDomainName:
+    Description: 'Name that is used to create the DNS entry without trailing dot (e.g. db.example).'
+    Type: String
+    Default: 'rds.int'
+  PreferredBackupWindow:
+    Description: 'The daily time range in UTC during which you want to create automated backups.'
+    Type: String
+    Default: '09:54-10:24'
+  PreferredMaintenanceWindow:
+    Description: 'The weekly time range (in UTC) during which system maintenance can occur.'
+    Type: String
+    Default: 'sat:07:00-sat:07:30'
+  EngineVersion:
+    Description: 'PostgreSQL version.'
+    Type: String
+  EnableIAMDatabaseAuthentication:
+    Description: 'Enable mapping of AWS Identity and Access Management (IAM) accounts to database accounts (https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html).'
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+  SubnetType:
+    Description: 'Type of subnet to use (public or private)'
+    Type: String
+    Default: private
+    AllowedValues: [public, private]
+  PubliclyAccessible:
+    Description: 'Specifies if the database instance should be publicly accessible'
+    Type: String
+    Default: false
+    AllowedValues: [true, false]
+  AllowMajorVersionUpgrade:
+    Description: 'Specifies if the database instance should allow major version upgrades.'
+    Type: String
+    Default: false
+    AllowedValues: [true, false]
+Conditions:
+  HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
+  HasDBOptionGroupName: !Not [!Equals [!Ref DBOptionGroupName, '']]
+  HasDBParameterGroupName: !Not [!Equals [!Ref DBParameterGroupName, '']]
+  HasCreateDBParameterGroup: !Equals [!Ref CreateDBParameterGroup, 'true']
+  HasHostedZone: !Not [!Equals [!Ref HostedZone, '']]
+  IsPublicSubnet: !Equals [!Ref SubnetType, 'public']
+Resources:
+  DatabaseSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: !Ref 'AWS::StackName'
+      VpcId: {'Fn::ImportValue': !Sub '${ParentVPCStack}-VPC'}
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0
+  DBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: !Ref 'AWS::StackName'
+      SubnetIds: !Split 
+        - ','
+        - !If 
+          - IsPublicSubnet
+          - {'Fn::ImportValue': !Sub '${ParentVPCStack}-SubnetsPublic'}
+          - {'Fn::ImportValue': !Sub '${ParentVPCStack}-SubnetsPrivate'}
+  RDSDBParameterGroup:
+    Condition: HasCreateDBParameterGroup
+    Type: 'AWS::RDS::DBParameterGroup'
+    Properties:
+      Description: CloudFormation Postgresql Parameter Group
+      Family: !Sub 
+        - "postgres${MajorVersion}"
+        - MajorVersion: !Select [0, !Split [".", !Ref EngineVersion]]
+      Parameters:
+        max_connections: '1000'
+  DBInstance:
+    DeletionPolicy: Snapshot # default
+    UpdateReplacePolicy: Snapshot
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      AllocatedStorage: !Ref DBAllocatedStorage
+      AllowMajorVersionUpgrade: !Ref AllowMajorVersionUpgrade
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: !Ref DBBackupRetentionPeriod
+      CopyTagsToSnapshot: true
+      DBInstanceClass: !Ref DBInstanceClass
+      DBName: !If [HasDBSnapshotIdentifier, !Ref 'AWS::NoValue', !Ref DBName]
+      DBParameterGroupName: !If [HasCreateDBParameterGroup, !Ref RDSDBParameterGroup, !If [HasDBParameterGroupName, !Ref DBParameterGroupName, !Ref 'AWS::NoValue']]
+      DBSnapshotIdentifier: !If [HasDBSnapshotIdentifier, !Ref DBSnapshotIdentifier, !Ref 'AWS::NoValue']
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      EnableIAMDatabaseAuthentication: !Ref EnableIAMDatabaseAuthentication
+      Engine: postgres
+      EngineVersion: !If [HasDBSnapshotIdentifier, !Ref 'AWS::NoValue', !Ref EngineVersion]
+      MasterUsername: !If [HasDBSnapshotIdentifier, !Ref 'AWS::NoValue', !Ref DBMasterUsername]
+      MasterUserPassword: !If
+        - HasDBSnapshotIdentifier
+        - !Ref 'AWS::NoValue'
+        - !Sub '{{resolve:ssm-secure:${DBMasterUserPasswordVaultPath}}}'
+      MultiAZ: !Ref DBMultiAZ
+      OptionGroupName: !If [HasDBOptionGroupName, !Ref DBOptionGroupName, !Ref 'AWS::NoValue']
+      PreferredBackupWindow: !Ref PreferredBackupWindow
+      PreferredMaintenanceWindow: !Ref PreferredMaintenanceWindow
+      StorageType: gp3
+      StorageEncrypted: !If [HasDBSnapshotIdentifier, !Ref 'AWS::NoValue', true]
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      PubliclyAccessible: !Ref PubliclyAccessible
+  DNSRecordSet:
+    Condition: HasHostedZone
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Sub '${HostedZone}.'
+      Name: !Sub '${SubDomainName}.${HostedZone}'
+      Type: CNAME
+      TTL: '300'
+      ResourceRecords:
+        - !GetAtt 'DBInstance.Endpoint.Address'
+    DependsOn: DBInstance
+Outputs:
+  TemplateID:
+    Description: 'Zymo Research template ID.'
+    Value: 'database/rds-postgres'
+  TemplateVersion:
+    Description: 'Zymo Research template version.'
+    Value: '__VERSION__'
+  StackName:
+    Description: 'Stack name.'
+    Value: !Sub '${AWS::StackName}'
+  InstanceName:
+    Description: 'The name of the database instance.'
+    Value: !Ref DBInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceName'
+  DNSName:
+    Description: 'The connection endpoint for the database.'
+    Value: !GetAtt 'DBInstance.Endpoint.Address'
+    Export:
+      Name: !Sub '${AWS::StackName}-DNSName'
